@@ -1,0 +1,152 @@
+---
+- name: Query Networks from ISE
+  hosts: ise_server
+  gather_facts: false
+  vars:
+    target_network_device_group: "net#net#offen"
+    line_separator: "\n"
+  # collections:
+  #   - cisco.ise
+
+  # ansible-playbook -i ise/network_device.yml --ask-vault-pass
+  # oder
+  # ansible-playbook -i ise/network_device.yml --vault-password-file ~/.ansible_vault_pass.txt
+  #
+  # ansible-vault edit group_vars/ise/vault.yml
+  tasks:
+    # - name: Show network names
+    #   debug:
+    #     msg: "gathered facts: {{ ansible_facts }}"
+
+    # - name: Show network names
+    #   debug:
+    #     msg: "{{ result }}"
+
+    - name: Find target network device group
+      cisco.ise.network_device_group_info:
+        ise_hostname: "{{ise_hostname}}"
+        ise_username: "{{ise_username}}"
+        ise_password: "{{ise_password}}"
+        ise_verify: "{{ise_verify}}"
+        ise_debug: "{{ise_debug}}"
+        ise_uses_api_gateway: "{{ise_uses_api_gateway}}"
+        ise_uses_csrf_token: "{{ise_uses_csrf_token}}"
+        name: "{{ target_network_device_group }}"
+      register: target_group
+
+    - name: Get network devices and find members of the target group
+      cisco.ise.network_device_info:
+        ise_hostname: "{{ise_hostname}}"
+        ise_username: "{{ise_username}}"
+        ise_password: "{{ise_password}}"
+        ise_verify: "{{ise_verify}}"
+        ise_debug: "{{ise_debug}}"
+        ise_uses_api_gateway: "{{ise_uses_api_gateway}}"
+        ise_uses_csrf_token: "{{ise_uses_csrf_token}}"
+      register: networks_raw
+
+    - name: Show target group
+      debug:
+        msg: "{{ target_group.ise_response | default([]) }}"
+
+    - name: Extract IDs of devices in the target group
+      set_fact:
+        network_device_ids: >-
+          {{
+            networks_raw.ise_response | default([])
+            | selectattr('NetworkDeviceGroupList', 'defined')
+            | selectattr('NetworkDeviceGroupList', 'contains', target_network_device_group)
+            | map(attribute='id')
+            | list
+          }}
+
+    - name: Show target group network device IDs
+      debug:
+        msg: "{{ network_device_ids | default([]) }}"
+
+    - name: Query each network device by id
+      cisco.ise.network_device_info:
+        ise_hostname: "{{ise_hostname}}"
+        ise_username: "{{ise_username}}"
+        ise_password: "{{ise_password}}"
+        ise_verify: "{{ise_verify}}"
+        ise_debug: "{{ise_debug}}"
+        ise_uses_api_gateway: "{{ise_uses_api_gateway}}"
+        ise_uses_csrf_token: "{{ise_uses_csrf_token}}"
+        id: "{{ item }}"
+      loop: "{{ network_device_ids | default([]) }}"
+      register: per_id_results
+
+    # - name: Show per-id results
+    #   debug:
+    #     msg:
+    #       id: "{{ item.item }}"
+    #       description: "{{ (item.ise_response | default([]) | first | default({})).description | default('') }}"
+    #       network_device_ip_list: >-
+    #         {{
+    #           ((item.ise_response | default([]) | first | default({})).NetworkDeviceIPList
+    #           | default((item.ise_response | default([]) | first | default({})).networkDeviceIPList
+    #           | default((item.ise_response | default([]) | first | default({})).network_device_ip_list
+    #           | default((item.ise_response | default({})).NetworkDeviceIPList
+    #           | default((item.ise_response | default({})).networkDeviceIPList
+    #           | default((item.ise_response | default({})).network_device_ip_list
+    #           | default([])))))))
+    #         }}
+    #       raw_response: "{{ item.ise_response | default([]) }}"
+    #   loop: "{{ per_id_results.results | default([]) }}"
+
+    - name: Build per-device IP address lists
+      set_fact:
+        per_device_ini_contents: >-
+          {{ per_device_ini_contents | default([]) + [
+            {
+              'addresses': (
+                item.ise_response.NetworkDeviceIPList
+                | default([])
+                | map(attribute='ipaddress')
+                | zip(
+                    item.ise_response.NetworkDeviceIPList
+                    | default([])
+                    | map(attribute='mask')
+                  )
+                | map('join', '/')
+                | map('ansible.utils.ipaddr', 'address')
+                | zip(
+                    item.ise_response.NetworkDeviceIPList
+                    | default([])
+                    | map(attribute='ipaddress')
+                    | zip(
+                        item.ise_response.NetworkDeviceIPList
+                        | default([])
+                        | map(attribute='mask')
+                      )
+                    | map('join', '/')
+                    | map('ansible.utils.ipaddr', 'prefix')
+                  )
+                | map('join', '/')
+                | list
+              )
+            }
+          ] }}
+      loop: "{{ per_id_results.results | default([]) }}"
+
+    - name: Show network per_device_ini_contents
+      debug:
+        msg: "{{ per_device_ini_contents | default([]) }}"
+
+    - name: Write all matching IP addresses to one file
+      copy:
+        dest: "{{ playbook_dir }}/network_devices.ini"
+        content: >-
+          {{
+            per_device_ini_contents | default([])
+            | map(attribute='addresses')
+            | flatten
+            | join(line_separator)
+          }}
+      delegate_to: localhost
+
+  # - name: Show network names
+  #   debug:
+  #     msg: "{{ networks_raw }}"
+  # #     # msg: "{{ networks_raw | json_query('current[].fvNetwork.attributes.name') }}"
